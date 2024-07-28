@@ -1,3 +1,6 @@
 *.prof
-*.log
+*.log*
 *.db
+test_dir
+.env
+.DS_Store
