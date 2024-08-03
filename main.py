@@ -16,6 +16,15 @@ TABLE_DEFS = [{
     DIRPATH TEXT NOT NULL
     );
     '''
+},
+{
+    "name": "filetypes",
+    "query": '''CREATE TABLE filetypes
+    (
+    INT PRIMARY KEY NOT NULL,
+    EXTENSION TEXT NOT NULL UNIQUE
+    );
+    '''
 }]
 
 try:
@@ -27,7 +36,6 @@ LOGGER_NAME = "PHOTOS_MANAGER"
 DB_NAME = "photos_manager.db"
 
 parser = argparse.ArgumentParser()
-# logging.basicConfig(filename="test.log", level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
 def createTable(conn, table_def):
     logger.info(f'Creating table: {table_def["name"]}')
@@ -125,9 +133,6 @@ def setupLogger():
 
     return logger
 
-def createDirectoriesTable(conn):
-    pass
-
 def connectToDB():
 
     logger.info("Connecting to database")
@@ -163,18 +168,29 @@ def searchForDirectories(path):
                 dirCount += 1 + searchForDirectories(entry.path)
 
     return dirCount
-            
 
 def searchForFiles(path):
-    pass
+    # logger.info(f"\tSearching {path}")
 
+    files = []
+    with os.scandir(path) as dirResults:
+
+        for entry in dirResults:
+            if not entry.name.startswith("."):
+                if entry.is_dir():
+                    files = files + searchForFiles(entry.path)
+                else:
+                    files.append(entry.path)
+
+    return files
 
 def findMedia(target_dir):
     
-    logger.info(f"Looking for media in {target_dir}")
-    dirCount = searchForDirectories(target_dir)
+    logger.info(f"Looking for media in root dir: {target_dir}")
+    # dirCount = searchForDirectories(target_dir)
+    files = searchForFiles(target_dir)
 
-    logger.info(f"There are {dirCount} directories contained within {target_dir}")
+    logger.info(f"There are {len(files)} media files contained within {target_dir}")
 
 if __name__ == "__main__":
 
@@ -183,8 +199,6 @@ if __name__ == "__main__":
     with cProfile.Profile() as profile:
 
         logger = setupLogger()
-
-        logger.debug("********************************************************")
         args = setupArgparser()        
 
         #setup connection to DB and check to see if the proper tables exist
