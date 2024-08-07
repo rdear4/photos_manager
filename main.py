@@ -6,23 +6,22 @@ import pstats
 import sqlite3
 import os
 from dotenv import load_dotenv, dotenv_values
+from PIL import Image, ExifTags
+import hashlib
+
 
 TABLE_DEFS = [{
     "name": "media",
     "query": '''CREATE TABLE media
     (
-    INT PRIMARY KEY NOT NULL,
+    id INTEGER PRIMARY KEY,
     FILENAME TEXT NOT NULL,
-    DIRPATH TEXT NOT NULL
-    );
-    '''
-},
-{
-    "name": "filetypes",
-    "query": '''CREATE TABLE filetypes
-    (
-    INT PRIMARY KEY NOT NULL,
-    EXTENSION TEXT NOT NULL UNIQUE
+    FILEPATH TEXT NOT NULL UNIQUE,
+    HASH TEXT NOT NULL,
+    FILETYPE TEXT NOT NULL,
+    DATETIME TEXT NOT NULL,
+    LATITUDE TEXT,
+    LONGITUDE TEXT
     );
     '''
 }]
@@ -73,10 +72,9 @@ def checkIfTablesExists(conn):
             logger.debug(f"Table: {table_def['name']} exists")
 
 def setupArgparser():
-    
-    logger.debug("Setting up argparser..")
 
     parser.add_argument("-t", "--test", help="This is only a test argument", action="store_true")
+    parser.add_argument("-c", "--critical", help="Set the logger level to critical, otherwise default level is INFO", action="store_true")
     parser.add_argument("-p", "--profile", help="Run the script with the profiler turned on", action="store_true")
     parser.add_argument("-db", "--setupdb", help="Create the database and the tables for directories and mediaFiles", action="store_true")
     parser.add_argument("-ddb", "--dropdb", help="Drop all the tables in the database", action="store_true")
@@ -88,13 +86,11 @@ def setupArgparser():
 
     try:
         args = parser.parse_args()
-        logger.debug("Attempted to parse args")
-        logger.debug("Argparser setup complete")
         return args
     except Exception as e:
-        logger.exception(f'Error parsing args: {e}')
+        print(f'Error parsing args: {e}')
 
-def setupLogger():
+def setupLogger(LEVEL):
 
     logging_config = {
         "version": 1,
@@ -110,11 +106,11 @@ def setupLogger():
                 "class": "logging.StreamHandler",
                 "formatter": "simple",
                 "stream": "ext://sys.stdout",
-                "level": "DEBUG"
+                "level": LEVEL
             },
             "file": {
                 "class": "logging.handlers.RotatingFileHandler",
-                "level": "DEBUG",
+                "level": LEVEL,
                 "formatter": "simple",
                 "filename": "photos_manager.log",
                 "maxBytes": 10000,
@@ -192,35 +188,116 @@ def findMedia(target_dir):
 
     logger.info(f"There are {len(files)} media files contained within {target_dir}")
 
+    return files
+
+def insertDataIntoDB(imgData, dbConn):
+
+    logger.info(f"Adding info for image: {imgData['filename']} to db")
+    curr = dbConn.cursor()
+    try:
+        curr.execute(f"INSERT INTO media (FILENAME, FILEPATH, HASH, FILETYPE, DATETIME, LATITUDE, LONGITUDE) VALUES ('{imgData['filename']}', '{imgData['filepath']}', '{imgData['hash']}', '{imgData['filetype']}', '{imgData['date']}', '{imgData['lat']}', '{imgData['lon']}')")
+        dbConn.commit()
+    except Exception as e:
+        logger.exception(f"Failed to insert data for image: {imgData['filepath']} into db")
+        logger.exception(e)
+
+
+def processJPG(filepath):
+
+    img = Image.open(filepath)
+    exifData = {
+            ExifTags.TAGS[k]: v
+            for k, v, in img._getexif().items()
+            if k in ExifTags.TAGS
+        }
+
+    
+    imgData = {
+        "hash": "",
+        "filename": filepath.split("/")[-1],
+        "filetype": filepath.split(".")[-1],
+        "filepath": filepath,
+        "date": "",
+        "lat": "",
+        "lon": ""
+    }
+
+    try:
+        imgData = {
+            "hash": hashlib.sha256(img.tobytes()).hexdigest(),
+            "filename": filepath.split("/")[-1],
+            "filetype": filepath.split(".")[-1],
+            "filepath": filepath,
+            "date": "" if exifData.get("DateTime", None) is None else exifData["DateTime"],
+            "lat": 0 if exifData.get("GPSInfo", None) is None else round(float(exifData["GPSInfo"][2][0] + exifData["GPSInfo"][2][1]/60 + exifData["GPSInfo"][2][2]/3600), 6),
+            "lon": 0 if exifData.get("GPSInfo", None) is None else round(float(exifData["GPSInfo"][4][0] + exifData["GPSInfo"][4][1]/60 + exifData["GPSInfo"][4][2]/3600), 6),
+        }
+    except Exception as e:
+        logger.exception(f"Failed to process file at path: {filepath}")
+        logger.exception(e)
+
+    return imgData
+
+PROCESSORS = [(["jpg", "jpeg"], processJPG)]
+
+def processMedia(files, dbConn):
+
+    fileTypes = []
+    
+    # for filepath in ["test_dir/IMG_3277.JPG"]:
+    for filepath in files:
+        logger.info(f"Processing file: {filepath}")
+        extension = filepath.split(".")[-1]
+
+        if extension not in fileTypes:
+            fileTypes.append(extension)
+
+        for processer in PROCESSORS:
+
+            if extension.lower() in processer[0]:
+                imgData = processer[1](filepath)
+                # logger.info(imgData)
+                insertDataIntoDB(imgData, dbConn)
+
+
+
+    logger.info(f"{len(fileTypes)} file types were found")
+    for ext in fileTypes:
+        logger.info(f"\t{ext}")
+
 if __name__ == "__main__":
 
     conn = None
 
     with cProfile.Profile() as profile:
 
-        logger = setupLogger()
-        args = setupArgparser()        
+        args = setupArgparser()
+
+        logger = setupLogger("CRITICAL" if args.critical else "INFO")
+                
 
         #setup connection to DB and check to see if the proper tables exist
         conn = connectToDB()
         checkIfTablesExists(conn)
     
-    if args.find:
-        findMedia(args.path)
+        if args.find:
+            filepaths = findMedia(args.path)
 
-    if args.dropdb:
-        dropTables(conn)
-    
-    #if a connection to the db was created during execution, close the connection
-    if conn:
-        closeDBConnection(conn)
-    else:
-        logger.debug("DB connection not opened")
+            processMedia(filepaths, conn)    
 
-    if args.profile:
-        results = pstats.Stats(profile)
-        results.sort_stats(pstats.SortKey.TIME)
-        results.print_stats()
-        results.dump_stats("results.prof")
+        if args.dropdb:
+            dropTables(conn)
+        
+        #if a connection to the db was created during execution, close the connection
+        if conn:
+            closeDBConnection(conn)
+        else:
+            logger.debug("DB connection not opened")
+
+        if args.profile:
+            results = pstats.Stats(profile)
+            results.sort_stats(pstats.SortKey.TIME)
+            results.print_stats()
+            results.dump_stats("results.prof")
 
 
