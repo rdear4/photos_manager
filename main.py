@@ -10,6 +10,7 @@ from PIL import Image, ExifTags
 import hashlib
 import datetime
 import ffmpeg
+import re
 
 
 TABLE_DEFS = [{
@@ -249,12 +250,50 @@ def processPNG(_imgData):
 def processVideo(_imgData):
 
     metaData = ffmpeg.probe(_imgData["filepath"])
-    location = metaData.get("format", {}).get("tags").get("location")
+
+    location = None
+
+    # LOCATION_TAGS = ["com.apple.quicktime.location.ISO6709", "location"]
+    try:
+        locationString = metaData.get("format", {}).get("tags").get("location") if metaData.get("format", {}).get("tags").get("com.apple.quicktime.location.ISO6709") is None else metaData.get("format", {}).get("tags").get("com.apple.quicktime.location.ISO6709")
+        logger.info(f"Location: {locationString}")
+        location = re.findall("[+-]\d+.\d+", locationString)
+        logger.info(location)
+    except Exception as e:
+        logger.exception("Failed to get location data")
+        logger.exception(e)
+
     try:
         _imgData["hash"] = ""
-        _imgData["date"] = 0 if metaData.get("format", {}).get("tags").get("date") is None else metaData.get("format", {}).get("tags").get("date")
-        _imgData["lat"] = 0 if location is None else location.split("-")[0]
-        _imgData["lon"] = 0 if location is None else location.split("-")[1]
+        _imgData["date"] = 0 if metaData.get("format", {}).get("tags").get("creation_time") is None else metaData.get("format", {}).get("tags").get("creation_time")
+        _imgData["lat"] = 0 if location is None else location[0]
+        _imgData["lon"] = 0 if location is None else location[1]
+        _imgData["processing_complete"] = 1
+    except Exception as e:
+        logger.exception(f"Failed to process file at path: {_imgData['filepath']}")
+        logger.exception(e)
+
+    return _imgData
+
+def processMOV(_imgData):
+
+    metaData = ffmpeg.probe(_imgData["filepath"])
+
+    location = None
+    try:
+        locationString = metaData.get("format", {}).get("tags").get("com.apple.quicktime.location.ISO6709")
+        logger.info(f"Location: {locationString}")
+        location = re.findall("[+-]\d+.\d+", locationString)
+        logger.info(location)
+    except Exception as e:
+        logger.exception("Failed to get location data")
+        logger.exception(e)
+
+    try:
+        _imgData["hash"] = ""
+        _imgData["date"] = 0 if metaData.get("format", {}).get("tags").get("creation_time") is None else metaData.get("format", {}).get("tags").get("date")
+        _imgData["lat"] = 0 if location is None else location[0]
+        _imgData["lon"] = 0 if location is None else location[1]
         _imgData["processing_complete"] = 1
     except Exception as e:
         logger.exception(f"Failed to process file at path: {_imgData['filepath']}")
@@ -268,13 +307,11 @@ def processAAE(_imgData):
 
     return _imgData
 
-PROCESSORS = [(["jpg", "jpeg"], processJPG), (["png"], processPNG), (["m4v", "mov"], processVideo), (["AAE"], processAAE)]
+PROCESSORS = [(["jpg", "jpeg"], processJPG), (["png"], processPNG), (["m4v", "mov", "mp4"], processVideo), (["AAE"], processAAE)]
 
 def processMedia(files, dbConn):
 
     fileTypes = []
-    
-    # for filepath in ["test_dir/IMG_3277.JPG"]:
     
     for filepath in files:
         logger.info(f"Processing file: {filepath}")
@@ -291,7 +328,7 @@ def processMedia(files, dbConn):
             "hash": "",
             "lat": "",
             "lon": "",
-            "date": "",
+            "date": datetime.datetime.fromtimestamp(os.stat(filepath).st_birthtime), #default file creation date for files with no creation_date metadata
             "processing_complete": 0
         }
         for processer in PROCESSORS:
